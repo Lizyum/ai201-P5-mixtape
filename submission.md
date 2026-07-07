@@ -559,3 +559,13 @@ This is the only change needed. The query already retrieves all songs in the cor
 ### 5. Side-effect check
 
 `get_playlist_songs()` is the only place `songs[:-1]` appeared. The other functions in `playlist_service.py` — `create_playlist()`, `get_playlist()`, and `get_user_playlists()` — do not slice their results and are unaffected. After the fix, a playlist with N songs returns exactly N songs, and the order by `position` is preserved.
+
+## AI Usage
+
+### 1. Codebase navigation and architecture understanding
+
+I used AI to help build a mental model of the project before making any changes. I asked it to explain the relationships between the SQLAlchemy models, identify how requests flowed from Flask routes to service functions, and summarize which files were most relevant to each reported bug. It produced a high-level codebase map and explanations of the model relationships. I revised the generated documentation to focus only on the relationships relevant to the assigned bugs and verified each explanation against the actual implementation before using it to guide my debugging.
+
+### 2. Root cause analysis and debugging
+
+I used AI as a debugging assistant to reason through failing tests and trace each bug to its underlying cause. Rather than asking it to generate fixes directly, I discussed the observed test failures, explored possible explanations, and validated those hypotheses by inspecting the service implementations myself. After identifying the root cause, I implemented the fixes manually and reran the project's test suite to confirm the intended behavior while checking that no existing functionality had regressed.
