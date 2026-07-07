@@ -5,7 +5,7 @@ Tests for the Friends Listening Now and activity feed logic.
 """
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime as real_datetime, timezone
 from unittest.mock import patch
 from app import create_app, db
 from models import User, Song, ListeningEvent
@@ -48,8 +48,8 @@ def test_friends_listening_now_excludes_yesterday(app):
 
         # Create a ListeningEvent that is yesterday but within 24 hours:
         # "now" = June 10 at 01:00 AM, listened_at = June 9 at 02:00 AM (23 hours ago, but yesterday)
-        fake_now = datetime(2024, 6, 10, 1, 0, 0, tzinfo=timezone.utc)
-        listened_at = datetime(2024, 6, 9, 2, 0, 0, tzinfo=timezone.utc)
+        fake_now = real_datetime(2024, 6, 10, 1, 0, 0, tzinfo=timezone.utc)
+        listened_at = real_datetime(2024, 6, 9, 2, 0, 0, tzinfo=timezone.utc)
 
         event = ListeningEvent(user_id=friend.id, song_id=song.id, listened_at=listened_at)
         db.session.add(event)
@@ -57,6 +57,9 @@ def test_friends_listening_now_excludes_yesterday(app):
 
         with patch("services.feed_service.datetime") as mock_dt:
             mock_dt.now.return_value = fake_now
+            # Pass constructor calls through to the real datetime so SQLite
+            # receives actual datetime objects instead of MagicMocks
+            mock_dt.side_effect = real_datetime
             result = get_friends_listening_now(user.id)
 
         assert result == [], (

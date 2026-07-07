@@ -440,35 +440,87 @@ After applying the fix, I reran the streak test suite. In addition to confirming
 ## Issue 2 — Friends Listening Now shows people from yesterday
 
 ### 1. How I reproduced it
-...
+
+I reproduced the bug using `tests/test_feed.py::test_friends_listening_now_excludes_yesterday`. The test creates two users, establishes a friendship between them, and records a `ListeningEvent` for the friend at **June 9, 2024 at 02:00 AM UTC**. The mocked "current time" is set to **June 10, 2024 at 01:00 AM UTC** — making the event 23 hours old but on a different calendar day. Calling `get_friends_listening_now()` was expected to return an empty list, but the friend appeared in the results because 23 hours is within 24 hours.
 
 ### 2. How I found the root cause
-...
+
+I opened `services/feed_service.py` and looked at how the query filters `ListeningEvent` rows. At the top of the file was:
+
+```python
+RECENT_THRESHOLD = timedelta(hours=24)
+```
+
+And inside `get_friends_listening_now()`:
+
+```python
+cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+```
+
+This made it immediately clear: the cutoff is computed by subtracting exactly 24 hours from the current timestamp. There is no concept of a calendar day anywhere in the logic — only a fixed rolling window. Any event within the last 24 hours passes the filter, regardless of whether it happened today or yesterday.
 
 ### 3. The root cause
-...
+
+The module-level constant `RECENT_THRESHOLD = timedelta(hours=24)` defined a rolling window rather than a calendar boundary. Subtracting a `timedelta` from `datetime.now()` produces an absolute timestamp 24 hours in the past — it has no awareness of midnight. If the current time is 01:00 AM on June 10, the cutoff lands at 01:00 AM on June 9, which means any listen after that point is included. A friend who listened at 02:00 AM on June 9 falls inside that window even though June 9 is yesterday. The feature name "Friends Listening Now" implies same-day recency, but the query was implementing "within the last 24 hours."
 
 ### 4. My fix
-...
+
+I replaced the rolling-window cutoff with a calendar-day boundary by computing midnight of the current UTC date:
+
+```python
+today = datetime.now(timezone.utc).date()
+cutoff = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+```
+
+`datetime.now(timezone.utc).date()` returns only the year/month/day of today with no time component. Reconstructing a `datetime` from those three fields sets the cutoff to exactly **00:00:00 UTC today**, so only events from the current calendar day pass the `listened_at >= cutoff` filter. The `RECENT_THRESHOLD` constant was removed entirely since it was no longer used.
 
 ### 5. Side-effect check
-...
+
+`get_activity_feed()` is the only other function in `feed_service.py` and it intentionally has no recency filter — it returns the most recent N events regardless of date. That function was not touched and is unaffected. After the fix I confirmed the reproducing test passes and that a friend who listens earlier the same day is still correctly included.
 
 ---
 
 ## Issue 3 — Same song appears multiple times in search
 
 ### 1. How I reproduced it
-...
+
+I reproduced the bug using `tests/test_search.py::test_search_no_duplicates_multi_tag_song`. The `seed_songs` fixture creates a song called "Crown Heights Anthem" and inserts three rows into the `song_tags` association table — one each for the tags `rap`, `hip-hop`, and `boom bap`. Calling `search_songs("Crown Heights")` and filtering results to that title produced a list of length 3 instead of 1 — one duplicate per tag row.
 
 ### 2. How I found the root cause
-...
+
+I opened `services/search_service.py` and read the query in `search_songs()`:
+
+```python
+results = (
+    db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .all()
+)
+```
+
+The `outerjoin` on `song_tags` is what caught my attention. The query starts from `Song`, joins against the `song_tags` association table, and calls `.all()` without `.distinct()`. In SQL, a `LEFT OUTER JOIN` produces one output row per matching row in the joined table. A song with three entries in `song_tags` therefore produces three joined rows, and `.all()` collects all three as separate `Song` ORM objects — even though they map to the same database record.
 
 ### 3. The root cause
-...
+
+`db.session.query(Song).outerjoin(song_tags, Song.id == song_tags.c.song_id)` joins each `Song` row against every matching row in `song_tags`. Because `song_tags` is a many-to-many association table, a song with N tags produces N joined rows in the result set. SQLAlchemy's ORM layer does not automatically collapse these back into a single `Song` object when `.all()` is called on a `Query` object — it returns one instance per row. The `to_dict()` call on each of those instances produces identical dicts, so the final list contains one copy of the song per tag it has.
 
 ### 4. My fix
-...
+
+Adding `.distinct()` before `.all()` instructs SQLAlchemy to emit a `SELECT DISTINCT` query, which deduplicates rows at the database level before the ORM constructs objects from them:
+
+```python
+results = (
+    db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .distinct()
+    .all()
+)
+```
+
+Since the `Song` primary key is included in the select, `DISTINCT` collapses the N tag-joined rows back to a single row per song before SQLAlchemy builds the result list.
 
 ### 5. Side-effect check
-...
+
+After applying the fix I ran the full `test_search.py` suite. The tests covering songs with zero tags (`test_search_no_duplicates_no_tag_song`) and one tag (`test_search_no_duplicates_single_tag_song`) both continued to pass — `.distinct()` is a no-op when there are no duplicate rows, so those cases are unaffected. The basic match test (`test_search_returns_matching_songs`) and the empty-result test also continued to pass.
