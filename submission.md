@@ -404,6 +404,7 @@ Expected fix:
 return [song.to_dict() for song in songs]
 ```
 
+---
 
 # Bug Root Cause Analysis
 
@@ -524,3 +525,37 @@ Since the `Song` primary key is included in the select, `DISTINCT` collapses the
 ### 5. Side-effect check
 
 After applying the fix I ran the full `test_search.py` suite. The tests covering songs with zero tags (`test_search_no_duplicates_no_tag_song`) and one tag (`test_search_no_duplicates_single_tag_song`) both continued to pass — `.distinct()` is a no-op when there are no duplicate rows, so those cases are unaffected. The basic match test (`test_search_returns_matching_songs`) and the empty-result test also continued to pass.
+
+## Issue 5 — Last song in a playlist never shows up
+
+### 1. How I reproduced it
+
+The bug is in `get_playlist_songs()` in `services/playlist_service.py`. To reproduce it: create a playlist, add multiple songs to it, call `get_playlist_songs()`, and compare the returned list against the songs that were added. The last song by position is always absent from the response regardless of how many songs the playlist contains.
+
+### 2. How I found the root cause
+
+I opened `services/playlist_service.py` and read `get_playlist_songs()`. The query itself is correct — it joins through `playlist_entries`, filters by `playlist_id`, and orders by `position`. The bug is on the return line:
+
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+
+The `[:-1]` slice on `songs` is immediately suspicious. Python's `[:-1]` means "everything except the last element," so regardless of how many songs the query returns, the final one is always dropped before the list is built.
+
+### 3. The root cause
+
+Python's slice notation `songs[:-1]` returns all elements of the list up to but not including the last index. Because this slice is applied to the full query result before calling `to_dict()`, the song at the highest `position` value is unconditionally excluded from every response. A single-song playlist returns an empty list; a ten-song playlist returns nine songs. There is no conditional logic — the off-by-one is always active.
+
+### 4. My fix
+
+I removed the `[:-1]` slice so the list comprehension iterates over the full `songs` result:
+
+```python
+return [song.to_dict() for song in songs]
+```
+
+This is the only change needed. The query already retrieves all songs in the correct order; the slice was the sole source of truncation.
+
+### 5. Side-effect check
+
+`get_playlist_songs()` is the only place `songs[:-1]` appeared. The other functions in `playlist_service.py` — `create_playlist()`, `get_playlist()`, and `get_user_playlists()` — do not slice their results and are unaffected. After the fix, a playlist with N songs returns exactly N songs, and the order by `position` is preserved.
