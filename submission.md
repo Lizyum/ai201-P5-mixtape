@@ -154,6 +154,89 @@ A single transaction persists:
 
 ---
 
+# Bug Reproduction Plan
+
+## Issue 1 — Listening streak resets on Sunday
+
+**Bug:** A user who listens on Saturday and then Sunday should have their streak increment, but it resets to 1.
+
+**How to reproduce:**
+
+1. Create a test user.
+2. Set their first listen to **Saturday, June 15, 2024**.
+3. Call `update_listening_streak(user, saturday)`.
+4. Verify the streak is `1`.
+5. Set their next listen to **Sunday, June 16, 2024**.
+6. Call `update_listening_streak(user, sunday)`.
+7. **Expected:** `listening_streak == 2`
+8. **Actual:** `listening_streak == 1`
+
+**Test used:**
+
+`tests/test_streaks.py::test_streak_increments_on_sunday`
+
+**Run with:**
+
+```bash
+pytest tests/test_streaks.py::test_streak_increments_on_sunday
+```
+
+**Trigger condition:** A consecutive listen where the second day is Sunday.
+
+---
+
+## Issue 2 — Friends Listening Now shows people from yesterday
+
+**Bug:** The feed uses a rolling 24-hour threshold instead of a calendar-day or "currently listening" window.
+
+**How to reproduce:**
+
+1. Create two users.
+2. Create a friendship between them.
+3. Create a song.
+4. Create a `ListeningEvent` for the friend from **yesterday**, but less than 24 hours ago.
+   - Example:
+     - Current time: Today, 10:00 PM
+     - Listening event: Yesterday, 11:00 PM
+5. Call the Friends Listening Now service.
+6. **Expected:** Yesterday's listening event is not returned.
+7. **Actual:** The event is returned because it falls within the last 24 hours.
+
+**Test Used:**
+
+`tests/test_feed.py::test_friends_listening_now_excludes_yesterday`
+
+**Trigger condition:** A listening event occurred on the previous calendar day but within the last 24 hours.
+
+---
+
+## Issue 3 — Same song appears multiple times in search
+
+**Bug:** Songs with multiple tags appear multiple times because the search query joins against `song_tags` without removing duplicate rows.
+
+**How to reproduce:**
+
+1. Create a user.
+2. Create a song.
+3. Associate the song with multiple tags.
+4. Search for the song by tag.
+5. **Expected:** One search result.
+6. **Actual:** One result per matching joined tag row.
+
+**Test used:**
+
+`tests/test_search.py::test_search_no_duplicates_multi_tag_song_by_tag`
+
+**Run with:**
+
+```bash
+pytest tests/test_search.py::test_search_no_duplicates_multi_tag_song_by_tag
+```
+
+**Trigger condition:** The searched song has multiple entries in the `song_tags` association table, and the search query joins through tags without using `.distinct()`.
+
+---
+
 # Bug Surfaces
 
 ## Bug 1 — Listening streak resets on Sunday
@@ -320,3 +403,72 @@ Expected fix:
 ```python
 return [song.to_dict() for song in songs]
 ```
+
+
+# Bug Root Cause Analysis
+
+## Issue 1 — Listening streak resets on Sunday
+
+### 1. How I reproduced it
+
+I reproduced the bug using `tests/test_streaks.py::test_streak_increments_on_sunday`. The test creates a new user, records a listen on Saturday, June 15, 2024, followed by another listen on Sunday, June 16, 2024. The expected streak was `2`, but the test failed because the streak reset to `1`.
+
+### 2. How I found the root cause
+
+Starting from the failing test, I followed the call to `update_listening_streak()` in `services/streak_service.py`. The consecutive-day logic contained the condition:
+
+```python
+elif days_since_last == 1 and today.weekday() != 6:
+```
+
+Seeing that `datetime.weekday()` returns `6` for Sunday made it clear that Sunday was being intentionally excluded from the increment branch.
+
+### 3. The root cause
+
+The streak increment logic only executed when `days_since_last == 1` **and** the current day was **not** Sunday. Because Sunday (`weekday() == 6`) failed this condition, a valid Saturday-to-Sunday consecutive listen fell through to the reset branch, causing the streak to restart at `1` instead of incrementing.
+
+### 4. My fix
+
+I removed the `today.weekday() != 6` condition so that any consecutive-day listen increments the streak regardless of the day of the week.
+
+### 5. Side-effect check
+
+After applying the fix, I reran the streak test suite. In addition to confirming that the Sunday regression test now passed, I verified that the existing behaviors remained unchanged: new users start with a streak of `1`, multiple listens on the same day do not increase the streak, consecutive weekdays still increment correctly, and skipping a day still resets the streak.
+
+---
+
+## Issue 2 — Friends Listening Now shows people from yesterday
+
+### 1. How I reproduced it
+...
+
+### 2. How I found the root cause
+...
+
+### 3. The root cause
+...
+
+### 4. My fix
+...
+
+### 5. Side-effect check
+...
+
+---
+
+## Issue 3 — Same song appears multiple times in search
+
+### 1. How I reproduced it
+...
+
+### 2. How I found the root cause
+...
+
+### 3. The root cause
+...
+
+### 4. My fix
+...
+
+### 5. Side-effect check
+...
